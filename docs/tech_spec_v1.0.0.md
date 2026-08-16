@@ -58,12 +58,12 @@ Resolved decisions (D#) with their design consequences, followed by the short li
 
 ### 2.2 Still open (parked in Phase 0, none block schema/HLD)
 
-1. **AI + recording disclosure wording** in the agent's opening line (legal to confirm; assume required).
-2. **Data retention** confirm: recordings 90 days, transcripts 1 year.
-3. **COD gateway detection** — validate `payment_gateway_names` values across pilot merchants' checkout setups.
+1. **AI + recording disclosure wording** in the agent's opening line (legal to confirm; assume required). Need to check this one. Not sure of the actual legal flow for this. 
+2. **Data retention** confirm: recordings 90 days, transcripts 1 year. I dont think we get the actual call recording from the retell. We can get the transcript. How much to store them needs to be checked. 
+3. **COD gateway detection** — validate `payment_gateway_names` values across pilot merchants' checkout setups. Not clear what this means.
 4. **Retell plan concurrency limit** — measure; dispatcher throttle set below it.
-5. **Consent capture UX** — checkout UI extension vs. cart-attribute checkbox; depends on merchants' checkout type (Checkout Extensibility vs. legacy).
-6. **Meta embedded-signup feasibility** for per-merchant WABA vs. manual onboarding for pilot.
+5. **Consent capture UX** — checkout UI extension vs. cart-attribute checkbox; depends on merchants' checkout type (Checkout Extensibility vs. legacy). This consent needs to checked. We will need the consent for call and whatssap message.
+6. **Meta embedded-signup feasibility** for per-merchant WABA vs. manual onboarding for pilot. Nope this is totally not needed. We will ensure the person themselves provide us with a WABA verified number to register. 
 7. **Invoice cadence & revenue-share %** — commercial, needed before Phase 4 billing UI.
 8. **Draft-order edge cases** — shipping charges, COD fees, partial payments, discounts interaction (validate on a dev store, Phase 0).
 
@@ -73,7 +73,7 @@ Resolved decisions (D#) with their design consequences, followed by the short li
 
 ### 3.1 Event detection: hybrid webhooks + reconciliation (unchanged from v0.1)
 
-Webhooks are primary: `checkouts/create|update`, `orders/create|paid|cancelled`, `fulfillments/update`, `fulfillment_events/create`, `app/uninstalled`, plus the three mandatory GDPR topics. Shopify fires **no "checkout abandoned" webhook** — abandonment is *derived*: on checkout activity we schedule a check at `T + delay`; when it fires we verify no order exists for the checkout token. A 15–30 min reconciliation poller repairs missed webhooks. `orders/create` cancels any pending abandoned-checkout engagement for its token — and, for COD orders, *creates* a COD engagement in the same handler.
+Webhooks are primary: `checkouts/create|update`, `orders/create|paid|cancelled`, `fulfillments/update`, `fulfillment_events/create`, `app/uninstalled`, plus the three mandatory GDPR topics. Shopify fires **no "checkout abandoned" webhook** — abandonment is *derived*: on checkout activity we schedule a check at `T + delay`; when it fires we verify no order exists for the checkout token. A 15–30 min reconciliation poller repairs missed webhooks. `orders/create` cancels any pending abandoned-checkout engagement for its token — and, for COD orders, *creates* a COD engagement in the same handler. Why do we want on the app uninstalled? We have something provided by shopify for the abandoned checkouts: https://shopify.dev/docs/api/admin-rest/latest/resources/abandoned-checkouts. This link needs to be checked ones for proper implementation. 
 
 ### 3.2 Scheduling & orchestration: Postgres state machine + worker queue (unchanged)
 
@@ -83,7 +83,7 @@ Postgres is the source of truth (`engagements.state`, `next_action_at`); a sched
 
 ### 3.3 Discount creation: mid-call via Retell custom function (unchanged)
 
-The agent calls `POST /fn/create-discount` only when the conversation reaches the offer step; backend creates the single-use, customer-scoped, expiring code and enqueues the WhatsApp send, returning an ack the agent can speak (<2s budget). Post-call handler is the fallback if the function fails. Codes existing **only when offered** is now doubly important: redemption is a *billing event* (D8, D12).
+The agent calls `POST /fn/create-discount` only when the conversation reaches the offer step; backend creates the single-use, customer-scoped, expiring code and enqueues the WhatsApp send, returning an ack the agent can speak (<2s budget). Post-call handler is the fallback if the function fails. Codes existing **only when offered** is now doubly important: redemption is a *billing event* (D8, D12). There is no discount code which is being created. The way we plan to do this for the abandoned checkout and the COD to online payments events is that we (the agent) will take confirmation from the user and ones the user agress the agent will be responsible to fire an API call to out backend.This backend call will be responsibel to get the discount promo codes (either they could be DB fetch or made on the fly this needs to come from research in the shopify). Then an personalised whatssap message is sent to the end user.  
 
 ### 3.4 Insight extraction: two layers (unchanged)
 
@@ -91,11 +91,11 @@ Layer 1 — Retell post-call structured fields per workflow (operational signal,
 
 ### 3.5 WhatsApp: Meta Cloud API, per-merchant WABA (updated per D11)
 
-Each merchant brings (or we provision) their own WABA + number. Consequences: (a) onboarding includes embedded signup / token handover + template submission per flow; (b) our `MessagingProvider` layer keys every send by `merchant_id → waba_id, phone_number_id, token`; (c) template approval status is tracked per merchant — **a flow cannot be enabled until its template is approved** (enforced in `flow_configs`). Consent from D3 satisfies WhatsApp's opt-in expectation.
+Each merchant brings (or we provision) their own WABA + number. Consequences: (a) onboarding includes embedded signup / token handover + template submission per flow; (b) our `MessagingProvider` layer keys every send by `merchant_id → waba_id, phone_number_id, token`; (c) template approval status is tracked per merchant — **a flow cannot be enabled until its template is approved** (enforced in `flow_configs`). Consent from D3 satisfies WhatsApp's opt-in expectation. This is sure the merchant needs to provide the WABA number.  
 
 ### 3.6 COD→prepaid mechanics: Shopify draft order (updated per D9)
 
-When the customer agrees on-call, the agent fires `POST /fn/create-payment-link`: we create a **draft order** mirroring the COD order (line items, discounts, shipping; minus COD fee if configured), send its `invoice_url` via WhatsApp, and track payment through `orders/create`/`orders/paid` for the draft-order-completed order. On payment: **cancel the original COD order** (restock=false, note linking to the new order), tag both, write the conversion. If the invoice isn't paid within an expiry window (default 24h), delete the draft order and release inventory. The duplicate-order window is the main operational risk (§12) — merchant ops must be briefed that a paid draft order supersedes the COD original.
+When the customer agrees on-call, the agent fires `POST /fn/create-payment-link`: we create a **draft order** mirroring the COD order (line items, discounts, shipping; minus COD fee if configured), send its `invoice_url` via WhatsApp, and track payment through `orders/create`/`orders/paid` for the draft-order-completed order. On payment: **cancel the original COD order** (restock=false, note linking to the new order), tag both, write the conversion. If the invoice isn't paid within an expiry window (default 24h), delete the draft order and release inventory. The duplicate-order window is the main operational risk (§12) — merchant ops must be briefed that a paid draft order supersedes the COD original. We are not sure of the name of the API call that is responsble for the COD to prepaid flow. We want to create a draft order corresponding to the COD. This draft order shall have all the details plus the agreed upon discount and then the link is shared via WA to the end user. We need to have an asynchronous job to run after sometime to know the status of the draft order if it is paid then we cancel/remove/delete the COD order or we need to cancel/remove/delete the draft order and continue with the COD ones. This async job ensures final sanity is always ensured in the flow.
 
 *Rejected alternatives:* external payment link (Razorpay) — clean UX but reconciliation to Shopify order state is manual and billing-grade attribution gets weaker; cancel-and-recreate before payment — customer may pay nothing and the original order is already gone.
 
