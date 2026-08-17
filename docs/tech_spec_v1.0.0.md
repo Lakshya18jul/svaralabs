@@ -111,81 +111,93 @@ When the customer agrees on-call, the agent fires `POST /fn/create-payment-link`
 
 ```mermaid
 flowchart LR
-    subgraph External
-        SH[Shopify Store]
-        RT[Retell AI<br/>Hinglish Voice Workflows]
-        WA[WhatsApp Cloud API<br/>per-merchant WABA]
+    subgraph P1["PHASE 1 - MERCHANT ONBOARDING (shared, one-time)"]
+        direction TB
+        A1["Merchant installs app<br/>via Shopify"] --> A2["Save store credentials +<br/>subscribe to store events<br/>incl. data-privacy compliance"]
+        A2 --> A3["Merchant provides business profile<br/>+ WhatsApp Business (WABA) details"]
+        A3 --> A4["Link merchant's WABA +<br/>approve message templates<br/>(one per flow)"]
+        A3 --> A5["Assign dedicated<br/>outbound calling number"]
+        A5 --> A6["Set up voice workflows in Retell<br/>(one per flow)<br/>on the merchant's number"]
+        A7["Merchant configures each flow:<br/>timings, frequency caps,<br/>discount toggle ON/OFF + %<br/>(recovery link and COD conversion),<br/>draft order expiry, calling hours,<br/>working days"] --> AG
+        A4 --> AG{"ACTIVATION GATE per flow:<br/>store connected, number assigned,<br/>template approved,<br/>workflow ready"}
+        A6 --> AG
+        AG -- all ready --> A8["Merchant ACTIVE -<br/>enabled flows go live"]
+        AG -- anything pending --> A9["Not active yet -<br/>pending items shown<br/>to merchant"]
     end
 
-    subgraph Backend["Python Backend (FastAPI + Workers)"]
-        OB[Onboarding Service<br/>OAuth, WABA signup,<br/>number provisioning, templates]
-        WH[Webhook Gateway<br/>/webhooks/*]
-        EP[Event Processor<br/>consent gate, eligibility,<br/>freq caps, product scoring]
-        SCH[Scheduler<br/>DB tick, window math]
-        ENG[Engagement Engine<br/>state machine]
-        DIAL[Call Dispatcher<br/>Retell client + throttle]
-        FN[Live Function Endpoint<br/><2s, called mid-call]
-        ACT[Action Executor<br/>discounts, draft orders,<br/>WhatsApp, order tags]
-        INS[Insight Pipeline<br/>Layer-2 LLM]
-        ATTR[Attribution Engine<br/>strict: redemptions + draft-order paid]
-        BILL[Billing Ledger<br/>flat fee + revenue share]
-        API[Merchant API<br/>dashboard + config]
+    subgraph P2["PHASE 2 - EVENT DETECTION TO SCHEDULING"]
+        direction TB
+        B1["Store event received<br/>from Shopify"] --> B2["Validate and record<br/>the event"]
+        B2 --> B3{"Event type?"}
+        B3 -- "order delivered" --> B4["Identify customer +<br/>capture delivered products"]
+        B4 --> B5["Schedule feedback call:<br/>7 days after delivery,<br/>working day, calling window"]
+        B3 -- "checkout started with<br/>contact info, not completed" --> B6["Wait out abandonment window<br/>(default 45 min)"]
+        B6 --> B7{"Purchase completed<br/>on its own meanwhile?"}
+        B7 -- yes --> B8["No call needed -<br/>checkout self-recovered"]
+        B7 -- no --> B9["Confirmed abandoned checkout -<br/>schedule recovery call<br/>within calling window"]
+        B3 -- "order placed with<br/>Cash on Delivery" --> B11["Schedule COD conversion call:<br/>15 min after order,<br/>within calling window -<br/>every COD order qualifies"]
+        B10["Safety net: periodically pull<br/>abandoned checkouts from Shopify<br/>to catch missed events"] -.-> B9
     end
 
-    DB[(Postgres)]
-    Q[(Redis / task queue)]
-
-    SH -- OAuth install --> OB
-    SH -- webhooks --> WH
-    WH --> EP --> DB
-    SCH --> DB
-    SCH --> Q --> ENG
-    ENG --> DIAL --> RT
-    RT -- custom functions --> FN --> ACT
-    RT -- call_ended / call_analyzed --> WH
-    ACT --> SH
-    ACT --> WA
-    WA -- delivery status --> WH
-    WH --> INS --> DB
-    ATTR --> BILL
-    ATTR --> DB
-    API --> DB
-```
-
-Component responsibilities are as in v0.1 with these changes: **Onboarding Service** is new (OAuth install, GDPR webhook handlers, WABA embedded signup, template submission tracking, outbound number assignment, flow-config bootstrap); **Event Processor** now enforces the **consent gate** first, then per-flow frequency caps, and runs the **feedback product-scoring heuristic** (D17) when creating feedback engagements; **Attribution Engine** consumes only redemption and draft-order-paid signals (D12) and feeds the **Billing Ledger** (D8). The payment-provider integration from v0.1 is deleted.
-
-### 4.2 Sequence — COD → Prepaid (the flow that changed most)
-
-```mermaid
-sequenceDiagram
-    participant SH as Shopify
-    participant WH as Webhooks
-    participant EP as Event Processor
-    participant SCH as Scheduler
-    participant RT as Retell
-    participant FN as Live Fn
-    participant ACT as Actions
-    participant C as Customer
-
-    SH->>WH: orders/create (gateway=COD, consent=yes)
-    WH->>EP: create engagement (state=SCHEDULED, T+15m)
-    SCH->>RT: create call (workflow=cod_prepaid, vars: name, order#, amount)
-    RT->>C: outbound call (merchant's dedicated number)
-    alt no answer
-        RT->>WH: call_ended(no_answer)
-        WH->>EP: next_action_at = next day 09:00 (attempt 2 max)
-    else agrees to pay online
-        RT->>FN: create_payment_link(engagement_id)
-        FN->>ACT: enqueue draft-order creation (ack <2s)
-        ACT->>SH: draftOrderCreate (mirror of COD order)
-        ACT->>C: WhatsApp template + invoice_url
-        RT->>WH: call_analyzed {order_confirmed, prepaid_agreed}
+    subgraph P3["PHASE 3 - CALL DAY: ELIGIBILITY + PREPARATION"]
+        direction TB
+        C1["Due calls picked up"] --> C2{"Eligibility checks:<br/>customer consented,<br/>not on do-not-call list,<br/>flow cap honoured<br/>(feedback + abandoned: 1 per 7d,<br/>COD: no cap)"}
+        C2 -- fail --> C3["Call cancelled,<br/>reason recorded"]
+        C2 -- pass --> C6{"Still relevant?<br/>abandoned: purchase not completed,<br/>COD: order still active,<br/>not cancelled or shipped"}
+        C6 -- no longer relevant --> C3
+        C6 -- yes --> C7{"Which flow?"}
+        C7 -- feedback --> C4[["PRODUCT SELECTION ENGINE<br/>in: customer's recent deliveries<br/>(calls x carts x products)<br/>out: the one product<br/>to collect feedback on"]]
+        C4 --> C5["Selected product recorded<br/>against the scheduled call"]
+        C7 -- abandoned checkout --> C8["Cart contents + checkout<br/>recovery link prepared,<br/>discount applied if merchant<br/>enabled the toggle"]
+        C7 -- COD conversion --> C9["COD order details prepared:<br/>items, amount, discount if<br/>merchant enabled the toggle"]
     end
-    C->>SH: pays invoice
-    SH->>WH: orders/create + orders/paid (draft-order completion)
-    WH->>ACT: cancel original COD order, tag + link both
-    WH->>EP: conversion (rule=draft_order_paid) → billing ledger
-    Note over ACT: invoice unpaid 24h → delete draft order
+
+    subgraph P4["PHASE 4 - CALL + OUTCOME"]
+        direction TB
+        D1["AI call placed from the<br/>merchant's number, personalised<br/>with customer, product, cart<br/>or order details"] --> D2(("Customer"))
+        D2 --> D3{"Answered?"}
+        D3 -- "no - feedback" --> D4["Marked missed -<br/>feedback calls not retried,<br/>no message sent"]
+        D3 -- "no - abandoned or COD" --> D10{"First attempt?"}
+        D10 -- yes --> D11["One retry scheduled for<br/>next working day,<br/>no message sent meanwhile"]
+        D10 -- no --> D12["Marked missed -<br/>attempts exhausted,<br/>no message sent"]
+        D3 -- yes --> D13{"Which flow?"}
+        D13 -- feedback --> D5["Feedback conversation:<br/>satisfaction, product quality,<br/>expectations vs reality,<br/>delivery experience, complaints"]
+        D13 -- abandoned --> D14["Understand reason<br/>for abandoning checkout"]
+        D14 --> D15{"Willing to complete<br/>the purchase?"}
+        D15 -- yes --> D16["Checkout recovery link<br/>(discount included if enabled)<br/>sent to customer's WhatsApp<br/>during the call"]
+        D15 -- no --> D6
+        D13 -- COD conversion --> D20["Confirm order intent +<br/>explain benefits of<br/>paying online"]
+        D20 --> D21{"Agrees to pay online?"}
+        D21 -- yes --> D22["Draft order created mirroring<br/>the COD order: items, shipping,<br/>discount if enabled, COD fee removed -<br/>draft holds NO inventory,<br/>stock stays with the COD order"]
+        D22 --> D23["Draft order payment link<br/>sent to customer's WhatsApp<br/>during the call"]
+        D21 -- no --> D6
+        D23 --> D6["Call outcome received:<br/>transcript + structured findings"]
+        D16 --> D6
+        D5 --> D6
+        D19["Any opt-out request honoured -<br/>customer added to<br/>do-not-call list"] -.-> D6
+        D6 --> D7[("Outcome saved")]
+        D7 --> D8["Engagement complete +<br/>insights on merchant dashboard"]
+    end
+
+    subgraph P5["PHASE 5 - CONVERSION SETTLEMENT (async)"]
+        direction TB
+        E1["Customer completes checkout<br/>via recovery link"] --> E2["Recovery recorded with proof -<br/>feeds billing (revenue share)"]
+        E3["Sanity job checks every<br/>open draft order until settled<br/>(payment events as fast path)"] --> E4{"Draft order paid<br/>within expiry window<br/>(default 24h)?"}
+        E4 -- paid --> E5["Immediately cancel original<br/>COD order with stock returned -<br/>new prepaid order keeps its<br/>deduction, so inventory is<br/>reduced exactly once -<br/>both orders tagged + cross-linked"]
+        E5 --> E6["COD conversion recorded with<br/>proof - feeds billing<br/>(revenue share)"]
+        E4 -- "not paid, or COD order<br/>cancelled or shipped meanwhile" --> E7["Draft order deleted -<br/>no inventory ever held by it -<br/>original COD order<br/>continues unchanged"]
+    end
+
+    A8 ==> B1
+    B5 ==> C1
+    B9 ==> C1
+    B11 ==> C1
+    C5 ==> D1
+    C8 ==> D1
+    C9 ==> D1
+    D11 -.-> C1
+    D16 -.-> E1
+    D23 -.-> E3
 ```
 
 Abandoned checkout is identical in skeleton with `create_discount` as the function and code redemption as the conversion signal. Feedback is call-only: trigger at delivery+7d on the top-scored product, 0 retries, outcome = insights, no conversion.
