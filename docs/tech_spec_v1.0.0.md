@@ -108,7 +108,79 @@ When the customer agrees on-call, the agent fires `POST /fn/create-payment-link`
 ## 4. High-Level Design
 
 ### 4.1 Component overview
+```mermaid
+flowchart TB
+    SH["Shopify Stores"]
+    RT["Retell AI"]
+    WAX["Meta WhatsApp<br/>Cloud API"]
+    CUST(("End Customer"))
+    MERCH(("Merchant"))
 
+    subgraph MONO["PYTHON MONOLITH - single deployable, modular internals"]
+        direction TB
+
+        subgraph L1["INTEGRATION LAYER"]
+            M1["1. STORE INTEGRATION GATEWAY"]
+            M2["2. VOICE CALL CONNECTOR"]
+            M3["3. MESSAGING MODULE"]
+        end
+
+        subgraph L2["CORE ENGINE LAYER"]
+            M4["4. ENGAGEMENT ORCHESTRATOR"]
+            M5["5. CONSENT + GUARDRAILS"]
+            M6[["6. PRODUCT SELECTION ENGINE"]]
+        end
+
+        subgraph L3["FLOW MODULES"]
+            M7["7. FEEDBACK FLOW"]
+            M8["8. CHECKOUT RECOVERY"]
+            M9["9. COD-TO-PREPAID"]
+        end
+
+        subgraph L4["VALUE LAYER"]
+            M10["10. INSIGHTS ENGINE"]
+            M11["11. ATTRIBUTION + BILLING"]
+        end
+
+        subgraph L5["MERCHANT EXPERIENCE"]
+            M12["12. ONBOARDING + CONFIG"]
+            M13["13. MERCHANT DASHBOARD"]
+        end
+
+        DB[("SHARED DATA STORE")]
+    end
+
+    MERCH -->|"step 0: one-time setup,<br/>activation gate"| M12
+    M12 --> DB
+
+    SH -->|"step 1: order delivered<br/>webhook"| M1
+    M1 -->|"step 2: clean<br/>Shopify event"| M4
+    M4 -->|"step 3: may_schedule?<br/>then step 5 on call day:<br/>may_proceed?"| M5
+    M4 -->|"step 4: engagement saved,<br/>due = +7 days<br/>(scheduler waits)"| DB
+    M4 -->|"step 6: prepare<br/>feedback call"| M7
+    M7 -->|"step 7: pick the one<br/>product to ask about"| M6
+    M7 -->|"step 8: call content<br/>ready, dial"| M2
+    M2 <-->|"step 9: call placed /<br/>outcome returned"| RT
+    RT -.->|"step 10: Hinglish<br/>conversation"| CUST
+    M2 -->|"step 11: transcript +<br/>findings"| M10
+    M10 -->|"step 12: insights"| M13
+    MERCH -->|"step 13: reviews<br/>dashboard"| M13
+    M10 --> DB
+
+    M4 -->|"R1/C1: same steps 2-6<br/>for other flows"| M8
+    M4 --> M9
+    M8 -->|"R2: recovery link +<br/>discount if enabled"| M3
+    M8 -->|"R3: create discount"| M1
+    M9 -->|"C2: draft order,<br/>settlement, single<br/>inventory deduction"| M1
+    M9 -->|"C3: Draft order link<br/>on WhatsApp"| M3
+    M3 -.->|"messages"| WAX
+    WAX -.-> CUST
+    M1 -->|"R4/C4: payment proof<br/>-> conversion -> billing"| M11
+    M11 -->|"billing statement"| M13
+```
+
+
+### 4.2 Flow Journey
 ```mermaid
 flowchart LR
     subgraph P1["PHASE 1 - MERCHANT ONBOARDING (shared, one-time)"]
@@ -199,9 +271,6 @@ flowchart LR
     D16 -.-> E1
     D23 -.-> E3
 ```
-
-Abandoned checkout is identical in skeleton with `create_discount` as the function and code redemption as the conversion signal. Feedback is call-only: trigger at delivery+7d on the top-scored product, 0 retries, outcome = insights, no conversion.
-
 ---
 
 ## 5. Engagement State Machine
